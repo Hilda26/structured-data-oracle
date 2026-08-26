@@ -113,6 +113,66 @@ actually read), never used in any control-flow decision.
   refreshable-snapshot philosophy already used by VisualClaim and SourceConsensus (a
   Feed is a standing oracle question, not a one-shot claim to protect from replay).
 
+## 4a. Equivalence-strategy choice, checked against GenLayer's own guidance and its own
+    reference prediction-market contract
+
+GenLayer's own build guidance is explicit about when to use `strict_eq` versus a
+custom leader/validator (`prompt_comparative`) equivalence strategy: `strict_eq` only
+when validators can reproduce exactly the same normalized output, and a custom
+leader/validator specifically for "external APIs with unstable fields." That second
+case is not a loose analogy to what this contract does — it is a literal, word-for-word
+description of `check_feed`'s job, which is precisely why `prompt_comparative` was
+chosen here and never `strict_eq`.
+
+Worth checking against GenLayer's own shipped example, since it's the one place their
+docs show a working "prediction market" pattern end to end: it resolves a single,
+hardcoded sports fixture by fetching one fixed, structurally stable BBC Sport page and
+uses `gl.eq_principle.strict_eq()` to require validators to reproduce byte-identical
+output. That's the right call for *that* contract - one known-stable source, one fixed
+extraction. It is not evidence that `strict_eq` would have been right here: this
+contract is a reusable registry over *arbitrary, creator-declared* API endpoints, whose
+whole reason for existing is that such endpoints are *not* structurally stable across
+providers or versions (§2 above). Reusing `strict_eq` against a source whose shape can
+legitimately drift would mean two honest validators reading the same value under a
+renamed key could disagree on the exact JSON text without disagreeing on what the data
+actually says - exactly the failure `prompt_comparative` with a meaning-based
+equivalence principle exists to prevent. Note also that even GenLayer's own "stable
+source" example still reserves an explicit "unresolved" sentinel (`-1`/`"-"`) for when
+extraction fails, rather than guessing - the same fail-safe instinct behind this
+contract's `NOT_FOUND`/`ERRORED` split.
+
+## 5a. Deliberately checked against every prior correction in this portfolio
+
+Three real review findings have already landed on earlier submissions here. Before
+calling this design done, each was checked against `check_feed` directly:
+
+- **HandleGuard's TOCTOU fix** (a shortlist frozen at request time judged against a
+  *shared, mutable* set — other users' handles — that could drift before an async
+  consensus round completed): does not apply. `check_feed` fetches everything it
+  judges live, inside the same round, every single time. There is no frozen
+  intermediate snapshot, and no Feed's verdict is ever compared against another Feed's
+  mutable state — each Feed is judged entirely against its own immutable parameters
+  and the live API response, with nothing else in the contract that could have drifted
+  underneath it between request and resolution.
+- **SourceConsensus's stale-verdicts-on-error fix** (a prior successful round's
+  per-source labels survived visible after a later round failed to parse): already
+  handled correctly from the first version of this contract, not patched in after the
+  fact - `extracted_value = ""` sits in the exact same branch as `state = STATE_ERRORED`
+  (see `check_feed`'s `if not verdict["ok"]:` block), so a failed re-check can never
+  leave a prior round's extracted value looking current. Verified directly by
+  `test_check_feed_on_fetch_failure_sets_errored`, which asserts both fields together.
+- **DisputeArbiter's bounded-timeout-exit fix** (a permanently unreachable evidence URL
+  could lock two parties' *escrowed stakes* forever, since `ERRORED` was retryable but
+  never guaranteed to resolve): does not apply, for a structural reason rather than an
+  oversight - `StructuredDataOracle` never escrows value. It has no payable method and
+  nothing at stake. A Feed stuck in `ERRORED` forever because its API died means
+  exactly one thing: that Feed stops producing fresh readings. Nothing is locked,
+  nothing needs a bounded exit to recover, because there was never anything to recover
+  - the same reason VisualClaim's and SourceConsensus's own refreshable-oracle designs
+  were never asked to add one either. A bounded timeout exit is specifically the
+  answer to "funds are stuck," not to "this data feed is stale," and conflating the two
+  would be solving a problem this contract doesn't have.
+
 ## 6. Storage layout
 
 ```

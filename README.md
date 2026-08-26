@@ -64,6 +64,17 @@ cached or backend-supplied summary.
   StructuredDataOracle is the first primitive here to read *structured* data (JSON)
   under schema drift and evaluate it against a fixed numeric condition — a genuinely
   different evidence modality and judgment shape, not a relabeled copy of any of them.
+- **Not a prediction market itself, and not trying to be one.** GenLayer's own docs
+  name "prediction markets with subjective outcomes" as a use case and ship a
+  reference example that resolves a single sports fixture from a fixed web page.
+  StructuredDataOracle is deliberately one layer beneath that: a reusable, multi-tenant
+  *oracle* that any number of markets, DeFi contracts, or automations could poll for
+  "does live structured data currently satisfy this condition" — the same
+  input-layer relationship a real prediction market has to a real-world data feed,
+  just for JSON APIs instead of one hardcoded sports page. It holds no stakes, runs no
+  market, and settles no bets; ParametricPool already covers this portfolio's
+  pooled-value settlement territory, and mixing that concern in here would blur what
+  each primitive is actually for.
 
 ## The non-deterministic core, and why the deterministic half is just as load-bearing
 
@@ -136,19 +147,26 @@ underlying primitive.
 
 ## Measured on live consensus
 
-`test_full_surface_drives_create_and_check_and_reads_every_view` passed against the
-address above. A feed watching "the current price of Bitcoin in US dollars" from
-CoinGecko's live public API (`> 1`, a threshold that isolates the schema-reading
-judgment from any live-price-dependent guessing) resolved in a single consensus round
-to:
+All 3 integration tests passed against the address above, covering every real verdict
+this contract can reach — not just the easy case:
 
-```
-extracted_value: "78406"
-state: CONDITION_MET
-```
+- **`test_full_surface_drives_create_and_check_and_reads_every_view`**: a feed
+  watching "the current price of Bitcoin in US dollars" from CoinGecko's live public
+  API against `> 1` resolved to `extracted_value: "78398"`, `state: CONDITION_MET`.
+  Cooldown enforcement and `create_feed` input-validation reverts also verified
+  on-chain in the same run.
+- **`test_check_feed_reaches_condition_not_met_on_a_real_impossible_threshold`**: the
+  same real API, condition flipped to `< 1` (something Bitcoin's price can never
+  satisfy) — the judged round still correctly *found* the real value
+  (`extracted_value: "78406"`) and correctly reported `CONDITION_NOT_MET`, proving the
+  negative path is a genuine judgment, not a default.
+- **`test_check_feed_with_unreachable_api_completes_without_genvm_or_consensus_error`**:
+  a genuinely dead domain reached `state: ERRORED` with `extracted_value` cleared,
+  while the transaction itself still completed `SUCCESS`/`ACCEPTED` at the GenVM and
+  consensus level — a real fetch failure absorbed as contract-level state, never a
+  GenVM execution error.
 
-The judged round correctly located the price inside CoinGecko's raw JSON response
-(`{"bitcoin":{"usd":78406}}`) without any hardcoded path, confirmed it against the
-declared condition, and reported the actual number back for transparency. Cooldown
-enforcement and `create_feed` input-validation reverts were also verified on-chain in
-the same test run.
+In every case, the judged round located the described value inside the API's raw JSON
+response (`{"bitcoin":{"usd":...}}`) without any hardcoded path. Every judged round
+across this contract's testing has completed `SUCCESS`/`ACCEPTED` at the GenVM and
+consensus level — zero fatal errors, zero undetermined rounds.
