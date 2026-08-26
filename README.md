@@ -129,6 +129,26 @@ underlying primitive.
 
 ## Deployment
 
-- Deployed StudioNet address: _pending manual deployment_
+- Deployed StudioNet address: `0x08be9d9316fBB505d6537dA73a8810CeC018965B`
+- Explorer: https://explorer-studio.genlayer.com/address/0x08be9d9316fBB505d6537dA73a8810CeC018965B
 - Studio import: open [studio.genlayer.com](https://studio.genlayer.com) → "Import
-  contract" → paste the deployed address once available.
+  contract" → paste `0x08be9d9316fBB505d6537dA73a8810CeC018965B`.
+
+## Measured on live consensus
+
+`test_full_surface_drives_create_and_check_and_reads_every_view` passed against the
+address above. A feed watching "the current price of Bitcoin in US dollars" from
+CoinGecko's live public API (`> 1`, a threshold that isolates the schema-reading
+judgment from any live-price-dependent guessing) resolved in a single consensus round
+to:
+
+```
+extracted_value: "78406"
+state: CONDITION_MET
+```
+
+The judged round correctly located the price inside CoinGecko's raw JSON response
+(`{"bitcoin":{"usd":78406}}`) without any hardcoded path, confirmed it against the
+declared condition, and reported the actual number back for transparency. Cooldown
+enforcement and `create_feed` input-validation reverts were also verified on-chain in
+the same test run.
