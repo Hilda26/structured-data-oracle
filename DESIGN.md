@@ -87,32 +87,6 @@ in this portfolio does. `extracted_value` is carried through purely for transpar
 and audit (it's stored and returned by `get_feed`, so anyone can see what the model
 actually read), never used in any control-flow decision.
 
-## 5. Failure and abstention semantics
-
-- **The API fails to fetch at all**: no judgment is even attempted — the leader
-  returns a `FETCH_ERROR` sentinel before ever calling `exec_prompt`. Distinct from
-  `NOT_FOUND`, which means the fetch succeeded but the described value genuinely isn't
-  in the response.
-- **`NOT_FOUND` vs `CONDITION_NOT_MET`**: kept deliberately distinct states, never
-  collapsed into one "false" outcome. `NOT_FOUND` means "we don't know whether the
-  condition holds, because the value isn't there to check." `CONDITION_NOT_MET` means
-  "we know the value, and it doesn't satisfy the condition." A consumer contract
-  gating on `CONDITION_MET` never needs to tell these apart to be safe (both fail the
-  gate), but an operator watching the feed absolutely does — `NOT_FOUND` is the signal
-  that the API or the field description needs attention, `CONDITION_NOT_MET` just
-  means "not yet."
-- **Unparseable model output, or a verdict label outside the declared set**: the whole
-  round is rejected as `ERRORED`, never silently coerced into any of the three real
-  states.
-- **Fail-safe direction**: always toward *not* asserting a condition is met on
-  ambiguous or missing evidence. `extracted_value` is cleared (not left stale) whenever
-  the round errors, so a consumer reading `get_feed` after a failed round never sees a
-  number that implies a successful extraction that didn't happen.
-- `check_feed` is always re-callable (subject only to the cooldown) from any prior
-  state, including `ERRORED` — no terminal "stuck forever" state, matching the
-  refreshable-snapshot philosophy already used by VisualClaim and SourceConsensus (a
-  Feed is a standing oracle question, not a one-shot claim to protect from replay).
-
 ## 4a. Equivalence-strategy choice, checked against GenLayer's own guidance and its own
     reference prediction-market contract
 
@@ -140,6 +114,32 @@ equivalence principle exists to prevent. Note also that even GenLayer's own "sta
 source" example still reserves an explicit "unresolved" sentinel (`-1`/`"-"`) for when
 extraction fails, rather than guessing - the same fail-safe instinct behind this
 contract's `NOT_FOUND`/`ERRORED` split.
+
+## 5. Failure and abstention semantics
+
+- **The API fails to fetch at all**: no judgment is even attempted — the leader
+  returns a `FETCH_ERROR` sentinel before ever calling `exec_prompt`. Distinct from
+  `NOT_FOUND`, which means the fetch succeeded but the described value genuinely isn't
+  in the response.
+- **`NOT_FOUND` vs `CONDITION_NOT_MET`**: kept deliberately distinct states, never
+  collapsed into one "false" outcome. `NOT_FOUND` means "we don't know whether the
+  condition holds, because the value isn't there to check." `CONDITION_NOT_MET` means
+  "we know the value, and it doesn't satisfy the condition." A consumer contract
+  gating on `CONDITION_MET` never needs to tell these apart to be safe (both fail the
+  gate), but an operator watching the feed absolutely does — `NOT_FOUND` is the signal
+  that the API or the field description needs attention, `CONDITION_NOT_MET` just
+  means "not yet."
+- **Unparseable model output, or a verdict label outside the declared set**: the whole
+  round is rejected as `ERRORED`, never silently coerced into any of the three real
+  states.
+- **Fail-safe direction**: always toward *not* asserting a condition is met on
+  ambiguous or missing evidence. `extracted_value` is cleared (not left stale) whenever
+  the round errors, so a consumer reading `get_feed` after a failed round never sees a
+  number that implies a successful extraction that didn't happen.
+- `check_feed` is always re-callable (subject only to the cooldown) from any prior
+  state, including `ERRORED` — no terminal "stuck forever" state, matching the
+  refreshable-snapshot philosophy already used by VisualClaim and SourceConsensus (a
+  Feed is a standing oracle question, not a one-shot claim to protect from replay).
 
 ## 5a. Deliberately checked against every prior correction in this portfolio
 

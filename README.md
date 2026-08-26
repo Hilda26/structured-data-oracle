@@ -135,8 +135,10 @@ underlying primitive.
   abstention path (including the `NOT_FOUND` vs `CONDITION_NOT_MET` distinction), and
   the worked consumer example, using gltest's built-in `mock_web`/`mock_llm`.
 - **Integration** (`tests/integration/`, `pytest tests/integration/ --network=studionet`):
-  requires `STRUCTUREDDATAORACLE_ADDRESS` set to a real StudioNet deployment; drives
-  `create_feed` and a real judged `check_feed` against a real, stable public JSON API.
+  3 tests, requires `STRUCTUREDDATAORACLE_ADDRESS` set to a real StudioNet deployment;
+  drives `create_feed` and real judged `check_feed` rounds covering `CONDITION_MET`,
+  `CONDITION_NOT_MET`, and a genuinely unreachable API (`ERRORED`), plus cooldown and
+  input-validation reverts on-chain.
 
 ## Deployment
 
