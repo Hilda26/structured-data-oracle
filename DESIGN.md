@@ -83,9 +83,81 @@ only content to read as data.
 
 Verdict is one of an enumerated triple, never a raw extracted number used for further
 on-chain math — validators compare a category, exactly as every other judged primitive
-in this portfolio does. `extracted_value` is carried through purely for transparency
+in this portfolio does. `extracted_value` is canonically bound (§3a) and carried for transparency
 and audit (it's stored and returned by `get_feed`, so anyone can see what the model
 actually read), never used in any control-flow decision.
+
+## 3a. Time: exactly one consensus-bound value, never a local wall-clock read
+
+Validators independently re-execute the whole contract call, not just the judged
+closure — so **any** `datetime.now()` read in the "deterministic" outer body is not
+actually deterministic across validators. Two validators evaluating the same call
+microseconds apart derive different timestamps, and near a cooldown boundary that
+means they can reach *opposite* allow/reject outcomes on the same transaction. An
+earlier version of this contract had exactly that defect: it read the clock twice in
+the outer body — once to decide the cooldown, once again to stamp `last_checked_at` —
+so the two values weren't even consistent with each other within a single execution.
+
+The fix is that the clock is read **exactly once, inside the judged flow**:
+
+```python
+def leader() -> str:
+    observed_at = datetime.now(timezone.utc).isoformat()   # the ONLY clock read
+    ...
+    model_envelope["observed_at"] = observed_at
+    return json.dumps(model_envelope)
+```
+
+Because `prompt_comparative` settles on a single accepted leader envelope, that one
+leader-proposed timestamp becomes the round's consensus-bound time value. The contract
+then uses **that same value** for both the cooldown decision and the stored
+`last_checked_at` — they are literally the same string, so they can never diverge from
+each other or between validators. `grep datetime.now contracts/structured_data_oracle.py`
+returns exactly one line, and it is inside the leader closure.
+
+Two consequences follow deliberately from this:
+
+- **The cooldown is checked after the round, not before.** The timestamp does not
+  exist until the round produces it. Paying for a round on a too-early call is the
+  price of never reading a local clock; the call then reverts, writing no state at all
+  (`test_a_rejected_cooldown_call_writes_no_state_at_all`).
+- **A round that returns no usable `observed_at` is rejected outright** rather than
+  falling back to any local reading — there is no fallback clock path to drift on.
+
+The equivalence principle explicitly instructs validators to ignore `observed_at`
+when comparing responses, since each validator's own run naturally stamps a different
+time and that difference is never a real disagreement about the verdict.
+
+Note on API choice: GenLayer's newer runner generation exposes deterministic
+timestamp APIs (`gl.message.datetime`, `gl.vm.get_timestamp()`), which would be the
+more direct fix. Both were probed directly against the pinned runner this contract
+deploys on (`py-genlayer:1jb45aa8...`) and **neither exists there** — `gl.message`
+exposes only `chain_id, contract_address, count, index, origin_address,
+sender_address, value`, and `gl.vm` has no timestamp function at all. Moving to the
+newer runner is not an option either: it is not loadable for real StudioNet
+deployment (verified earlier in this portfolio's history, and the reason every
+contract here pins the older hash). Placing the single clock read inside the judged
+flow is therefore the correct fix available on the deployable runner — and it is
+precisely what the review's own wording asks for: "no local wall-clock read should
+occur outside the judged flow."
+
+## 3b. `extracted_value` is canonically bound, not descriptive metadata
+
+`extracted_value` is stored and exposed by `get_feed`, so consumers can and will read
+it. To make that safe, it is validated to exactly the same canonical form the
+threshold itself must take (`_is_valid_threshold`): a bare decimal number, optional
+leading minus, at most one decimal point — no units, currency symbols, thousands
+separators, scientific notation, or prose. A `CONDITION_MET`/`CONDITION_NOT_MET`
+verdict whose value fails that check **rejects the entire round** as `ERRORED` rather
+than storing an unparseable string, and `NOT_FOUND` carries no value by construction
+even if the model attaches one.
+
+The practical guarantee: any consumer reading `extracted_value` off a settled feed can
+parse it as a number directly, and can trust it is the value the consensus verdict was
+actually reached against — never a model embellishment that happened to ride along.
+The leader's prompt states the same constraint explicitly, so the model is asked for a
+bare number rather than being silently corrected afterward. It remains outside all
+control flow: the contract's own routing keys off the verdict category alone.
 
 ## 4a. Equivalence-strategy choice, checked against GenLayer's own guidance and its own
     reference prediction-market contract
@@ -186,8 +258,8 @@ Feed:
   check_cooldown_seconds: u256      # immutable
   state: str                        # NEVER_CHECKED | CONDITION_MET |
                                      # CONDITION_NOT_MET | NOT_FOUND | ERRORED
-  extracted_value: str              # transparency only, never used in control flow
-  last_checked_at: str
+  extracted_value: str              # canonical decimal (see 3b), never in control flow
+  last_checked_at: str              # the round's own consensus timestamp (see 3a)
   check_count: u256
 ```
 

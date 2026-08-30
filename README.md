@@ -101,6 +101,9 @@ fetch failure from ever being mistaken for a genuine judgment. Full rationale in
 | "The value isn't there" is never conflated with "the value is there but fails the condition" | `NOT_FOUND` and `CONDITION_NOT_MET` are kept as distinct states | `test_check_feed_condition_not_met_is_distinct_from_not_found`, `test_check_feed_not_found_when_field_genuinely_absent` |
 | An out-of-band verdict label is never coerced into a real state | `_parse_oracle_verdict` accepts only the three declared verdicts | `test_check_feed_discards_an_out_of_band_verdict_label` |
 | A failed round never leaves a stale extracted value looking current | `extracted_value` is cleared whenever `check_feed` errors | `test_check_feed_on_fetch_failure_sets_errored` |
+| Validators can never derive different timestamps or opposite cooldown outcomes | the clock is read exactly once, inside the judged flow; that single consensus-bound value drives both the cooldown decision and the stored `last_checked_at` | `test_stored_last_checked_at_is_the_rounds_own_consensus_timestamp`, `test_cooldown_is_decided_against_the_same_consensus_timestamp_that_gets_stored` |
+| A cooldown-rejected call writes no state at all | the check runs after the round and reverts, rolling everything back | `test_a_rejected_cooldown_call_writes_no_state_at_all` |
+| `extracted_value` is always a parseable number a consumer can rely on, never prose | validated to the same canonical decimal form as the threshold; a non-canonical value rejects the whole round | `test_check_feed_rejects_a_non_canonical_extracted_value`, `test_not_found_verdict_carries_no_extracted_value_by_construction` |
 | Anyone can push a stuck `ERRORED` feed forward, not just the creator | `check_feed` has no caller restriction, ever | `test_check_feed_after_errored_can_be_retried_by_anyone_once_cooldown_allows` |
 | A feed is a shared public oracle from the first call, not a personal claim | no "creator only" gate on the first check | `test_check_feed_is_permissionless_from_the_first_call` |
 
@@ -130,7 +133,7 @@ underlying primitive.
 
 ## Testing
 
-- **Direct-mode** (`tests/direct/`, `pytest tests/direct/`): 23 tests, no network, no
+- **Direct-mode** (`tests/direct/`, `pytest tests/direct/`): 29 tests, no network, no
   live consensus — fast feedback on every deterministic branch, every failure/
   abstention path (including the `NOT_FOUND` vs `CONDITION_NOT_MET` distinction), and
   the worked consumer example, using gltest's built-in `mock_web`/`mock_llm`.

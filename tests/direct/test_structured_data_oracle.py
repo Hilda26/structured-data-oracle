@@ -221,6 +221,150 @@ def test_check_feed_permitted_again_after_cooldown_elapses(direct_deploy, direct
     assert f["state"] == "CONDITION_NOT_MET"
 
 
+# ---------------------------------------------------------------------
+# Consensus-bound timestamp: one value drives both the cooldown decision
+# and the stored last_checked_at, and no clock is read outside the
+# judged flow
+# ---------------------------------------------------------------------
+
+
+def test_stored_last_checked_at_is_the_rounds_own_consensus_timestamp(
+    direct_deploy, direct_vm, direct_owner
+):
+    """
+    The leader stamps `observed_at` once inside the judged flow and the
+    contract stores exactly that value - it never takes a second, separate
+    clock reading for storage. Warping the VM clock to a known instant
+    before the round means the stored timestamp must be that instant, not
+    some later moment sampled afterwards.
+    """
+    frozen = "2026-03-01T12:00:00+00:00"
+    c = _deploy(direct_deploy, direct_vm, direct_owner)
+    feed_id = _create_feed(c, direct_vm, direct_owner)
+    warp_to(direct_vm, frozen)
+    _mock_response(direct_vm, '{"rate": 1.08}')
+    _mock_verdict(direct_vm, '{"verdict": "CONDITION_MET", "extracted_value": "1.08"}')
+    c.check_feed(feed_id)
+    assert c.get_feed(feed_id)["last_checked_at"] == frozen
+
+
+def test_cooldown_is_decided_against_the_same_consensus_timestamp_that_gets_stored(
+    direct_deploy, direct_vm, direct_owner
+):
+    """
+    Both sides of the cooldown comparison come from round timestamps, so
+    the decision is reproducible from stored state alone. One second
+    before the boundary must reject; one second after must allow - and the
+    newly stored timestamp must again be exactly the round's own value.
+    """
+    from datetime import datetime, timedelta
+
+    first = "2026-03-01T12:00:00+00:00"
+    c = _deploy(direct_deploy, direct_vm, direct_owner)
+    feed_id = _create_feed(c, direct_vm, direct_owner, check_cooldown_seconds=3600)
+
+    warp_to(direct_vm, first)
+    _mock_response(direct_vm, '{"rate": 1.08}')
+    _mock_verdict(direct_vm, '{"verdict": "CONDITION_MET", "extracted_value": "1.08"}')
+    c.check_feed(feed_id)
+    assert c.get_feed(feed_id)["last_checked_at"] == first
+
+    first_dt = datetime.fromisoformat(first)
+
+    # one second inside the cooldown -> rejected, and no state advanced
+    warp_to(direct_vm, (first_dt + timedelta(seconds=3599)).isoformat())
+    with direct_vm.expect_revert("cooldown"):
+        c.check_feed(feed_id)
+    still = c.get_feed(feed_id)
+    assert still["check_count"] == 1
+    assert still["last_checked_at"] == first
+
+    # one second past the cooldown -> allowed, stamped with the new round
+    after = (first_dt + timedelta(seconds=3601)).isoformat()
+    warp_to(direct_vm, after)
+    direct_vm.clear_mocks()
+    _mock_response(direct_vm, '{"rate": 0.95}')
+    _mock_verdict(direct_vm, '{"verdict": "CONDITION_NOT_MET", "extracted_value": "0.95"}')
+    c.check_feed(feed_id)
+    f = c.get_feed(feed_id)
+    assert f["check_count"] == 2
+    assert f["last_checked_at"] == after
+
+
+def test_a_rejected_cooldown_call_writes_no_state_at_all(direct_deploy, direct_vm, direct_owner):
+    """The cooldown check now runs after the judged round, so a too-early
+    call must revert cleanly and leave every field exactly as it was -
+    including the verdict from the previous successful round."""
+    frozen = "2026-03-01T12:00:00+00:00"
+    c = _deploy(direct_deploy, direct_vm, direct_owner)
+    feed_id = _create_feed(c, direct_vm, direct_owner, check_cooldown_seconds=3600)
+    warp_to(direct_vm, frozen)
+    _mock_response(direct_vm, '{"rate": 1.08}')
+    _mock_verdict(direct_vm, '{"verdict": "CONDITION_MET", "extracted_value": "1.08"}')
+    c.check_feed(feed_id)
+    before = c.get_feed(feed_id)
+
+    direct_vm.clear_mocks()
+    _mock_response(direct_vm, '{"rate": 9.99}')
+    _mock_verdict(direct_vm, '{"verdict": "CONDITION_NOT_MET", "extracted_value": "9.99"}')
+    with direct_vm.expect_revert("cooldown"):
+        c.check_feed(feed_id)
+
+    assert c.get_feed(feed_id) == before
+
+
+# ---------------------------------------------------------------------
+# extracted_value is canonically bound, not descriptive metadata
+# ---------------------------------------------------------------------
+
+
+def test_check_feed_rejects_a_non_canonical_extracted_value(direct_deploy, direct_vm, direct_owner):
+    """A consumer must be able to parse extracted_value as a number
+    directly, so anything that isn't a bare decimal - units, currency
+    symbols, separators, prose - rejects the whole round rather than being
+    stored as-is."""
+    c = _deploy(direct_deploy, direct_vm, direct_owner)
+    for bad in ['"1.08 USD"', '"$1.08"', '"1,080"', '"1.08e2"', '"about 1.08"', '"N/A"', "123"]:
+        direct_vm.clear_mocks()
+        _mock_response(direct_vm, '{"rate": 1.08}')
+        _mock_verdict(direct_vm, '{"verdict": "CONDITION_MET", "extracted_value": ' + bad + "}")
+        feed_id = _create_feed(c, direct_vm, direct_owner)
+        c.check_feed(feed_id)
+        f = c.get_feed(feed_id)
+        assert f["state"] == "ERRORED", f"non-canonical value {bad} should have errored, got {f}"
+        assert f["extracted_value"] == ""
+
+
+def test_check_feed_accepts_canonical_negative_and_integer_extracted_values(
+    direct_deploy, direct_vm, direct_owner
+):
+    c = _deploy(direct_deploy, direct_vm, direct_owner)
+    for good in ["-3.5", "100", "0"]:
+        direct_vm.clear_mocks()
+        _mock_response(direct_vm, '{"rate": 1.08}')
+        _mock_verdict(direct_vm, '{"verdict": "CONDITION_MET", "extracted_value": "' + good + '"}')
+        feed_id = _create_feed(c, direct_vm, direct_owner)
+        c.check_feed(feed_id)
+        f = c.get_feed(feed_id)
+        assert f["state"] == "CONDITION_MET"
+        assert f["extracted_value"] == good
+
+
+def test_not_found_verdict_carries_no_extracted_value_by_construction(
+    direct_deploy, direct_vm, direct_owner
+):
+    """NOT_FOUND means no value was found, so it must never carry one -
+    even if the model tries to attach a number anyway."""
+    c = _deploy(direct_deploy, direct_vm, direct_owner)
+    feed_id = _create_feed(c, direct_vm, direct_owner)
+    _mock_response(direct_vm, '{"error": "rate limited"}')
+    _mock_verdict(direct_vm, '{"verdict": "NOT_FOUND", "extracted_value": "1.08"}')
+    c.check_feed(feed_id)
+    f = c.get_feed(feed_id)
+    assert f["state"] == "NOT_FOUND"
+    assert f["extracted_value"] == ""
+
+
 def test_check_feed_after_errored_can_be_retried_by_anyone_once_cooldown_allows(
     direct_deploy, direct_vm, direct_owner, direct_alice
 ):
