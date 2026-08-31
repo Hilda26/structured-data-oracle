@@ -145,10 +145,13 @@ underlying primitive.
 
 ## Deployment
 
-- Deployed StudioNet address: `0x08be9d9316fBB505d6537dA73a8810CeC018965B`
-- Explorer: https://explorer-studio.genlayer.com/address/0x08be9d9316fBB505d6537dA73a8810CeC018965B
+- Deployed StudioNet address: `0x51C695A81eA8c9Bb13923cE679B2894B9f0f2AFD` (redeployed
+  with the consensus-timestamp fix; supersedes
+  `0x08be9d9316fBB505d6537dA73a8810CeC018965B`, which read a local wall clock outside
+  the judged flow — see `REVIEW.md`)
+- Explorer: https://explorer-studio.genlayer.com/address/0x51C695A81eA8c9Bb13923cE679B2894B9f0f2AFD
 - Studio import: open [studio.genlayer.com](https://studio.genlayer.com) → "Import
-  contract" → paste `0x08be9d9316fBB505d6537dA73a8810CeC018965B`.
+  contract" → paste `0x51C695A81eA8c9Bb13923cE679B2894B9f0f2AFD`.
 
 ## Measured on live consensus
 
@@ -157,13 +160,13 @@ this contract can reach — not just the easy case:
 
 - **`test_full_surface_drives_create_and_check_and_reads_every_view`**: a feed
   watching "the current price of Bitcoin in US dollars" from CoinGecko's live public
-  API against `> 1` resolved to `extracted_value: "78398"`, `state: CONDITION_MET`.
+  API against `> 1` resolved to `extracted_value: "78853"`, `state: CONDITION_MET`.
   Cooldown enforcement and `create_feed` input-validation reverts also verified
   on-chain in the same run.
 - **`test_check_feed_reaches_condition_not_met_on_a_real_impossible_threshold`**: the
   same real API, condition flipped to `< 1` (something Bitcoin's price can never
   satisfy) — the judged round still correctly *found* the real value
-  (`extracted_value: "78406"`) and correctly reported `CONDITION_NOT_MET`, proving the
+  (`extracted_value: "78793"`) and correctly reported `CONDITION_NOT_MET`, proving the
   negative path is a genuine judgment, not a default.
 - **`test_check_feed_with_unreachable_api_completes_without_genvm_or_consensus_error`**:
   a genuinely dead domain reached `state: ERRORED` with `extracted_value` cleared,
@@ -175,3 +178,9 @@ In every case, the judged round located the described value inside the API's raw
 response (`{"bitcoin":{"usd":...}}`) without any hardcoded path. Every judged round
 across this contract's testing has completed `SUCCESS`/`ACCEPTED` at the GenVM and
 consensus level — zero fatal errors, zero undetermined rounds.
+
+These runs also confirm the consensus-timestamp fix end to end: every settled feed's
+`last_checked_at` carries the round's own single `observed_at` value (e.g.
+`2026-08-30T16:10:52.371007+00:00`), and every `extracted_value` came back in
+canonical bare-decimal form (`78853`, `78793`, and `""` for the errored feed) rather
+than as free-form model text.

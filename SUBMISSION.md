@@ -4,7 +4,7 @@
 
 StructuredDataOracle — Schema-Drift-Resilient JSON API Condition Oracle
 
-## Notes / Description (≤1000 characters, 898 used)
+## Notes / Description (≤1000 characters, 937 used)
 
 StructuredDataOracle judges live JSON API data against a declared condition -
 resilient to schema drift, unlike a JSON path that breaks silently when an API
@@ -13,20 +13,58 @@ URL, a field description, and a comparator/threshold; check_feed fetches the API
 in one judged round and validators read the raw response for what it contains,
 recognizing the value under whatever key or nesting it appears as. NOT_FOUND (value
 genuinely absent) is kept strictly separate from CONDITION_NOT_MET (value found,
-condition unmet). Checked against every prior portfolio correction: no frozen-state
-race, no stale-verdict-on-error, no fund-lock risk since nothing is escrowed here.
-Equivalence strategy matches GenLayer's own guidance for external APIs with unstable
-fields. 340-line contract, 23 direct tests, 3 passing live StudioNet tests.
+condition unmet). Time is consensus-bound: the clock is read exactly once inside the
+judged flow, and that single value drives both the cooldown decision and the stored
+timestamp, so validators can never diverge. extracted_value is canonically bound to a
+bare decimal a consumer can parse directly. 415-line contract, 29 direct tests, 3
+passing live StudioNet tests.
 
 ## Evidence links
 
 - GitHub repo: https://github.com/Hilda26/structured-data-oracle (no AI attribution —
   verified via `git log -1 --format='%B' | grep -i "co-authored\|claude\|generated
   with"` → no match, on every commit)
-- Explorer contract URL: https://explorer-studio.genlayer.com/address/0x08be9d9316fBB505d6537dA73a8810CeC018965B
+- Explorer contract URL: https://explorer-studio.genlayer.com/address/0x51C695A81eA8c9Bb13923cE679B2894B9f0f2AFD
 - Studio import URL: open studio.genlayer.com → Import contract →
-  `0x08be9d9316fBB505d6537dA73a8810CeC018965B`
-- Deployed StudioNet address: `0x08be9d9316fBB505d6537dA73a8810CeC018965B`
+  `0x51C695A81eA8c9Bb13923cE679B2894B9f0f2AFD`
+- Deployed StudioNet address: `0x51C695A81eA8c9Bb13923cE679B2894B9f0f2AFD`
+  (redeployed with the consensus-timestamp fix; supersedes
+  `0x08be9d9316fBB505d6537dA73a8810CeC018965B`)
+
+## Review addressed — consensus-bound time value
+
+> Please replace the datetime.now() cooldown path with one deterministic or
+> consensus-bound time value that every validator uses identically for both the
+> cooldown decision and the stored last_checked_at. No local wall-clock read should
+> occur outside the judged flow [...] Optional hardening: if future consumers will
+> rely on extracted_value, bind a canonical value rather than treating it as
+> descriptive metadata.
+
+**Fixed.** The clock is now read exactly once, inside the judged flow, and that single
+leader-proposed `observed_at` rides in the accepted round envelope — making it a
+consensus-bound value that every validator settles on identically. The contract uses
+*that same string* for both the cooldown decision and the stored `last_checked_at`, so
+they cannot diverge from each other or between validators. `grep datetime.now` on the
+contract returns exactly one line, inside the leader closure; the `_now_iso()` helper
+that supplied the old second reading was deleted entirely, leaving no fallback clock
+path.
+
+Two deliberate consequences: the cooldown is now checked *after* the round (the
+timestamp doesn't exist until the round produces it — a too-early call reverts writing
+no state), and a round returning no usable `observed_at` is rejected outright rather
+than falling back to a local reading.
+
+**Optional hardening also done.** `extracted_value` is now validated to the same
+canonical bare-decimal form the threshold must take — a non-conforming value rejects
+the whole round rather than storing unparseable text, so a consumer can parse it
+directly and trust it was the value the verdict was reached against.
+
+GenLayer's newer runner exposes `gl.message.datetime` / `gl.vm.get_timestamp()`, which
+would be more direct — both were probed against the pinned deployable runner and
+**neither exists there**, and the newer runner isn't loadable for real StudioNet
+deployment. Placing the single clock read inside the judged flow is the correct fix
+available on the deployable runner, and is exactly what the review's wording
+prescribes. Full writeup in `REVIEW.md` and `DESIGN.md` §3a/§3b.
 
 ## Why this is not "too simple" - a deliberate self-audit before submission
 
@@ -61,9 +99,12 @@ creator-declared APIs). Full writeup in `DESIGN.md` §4a and §5a.
 
 - `genvm-lint check contracts/structured_data_oracle.py --json` and the worked
   example: both clean.
-- `pytest tests/direct/` — 23/23 passing (creation validation including malformed-
+- `pytest tests/direct/` — 29/29 passing (creation validation including malformed-
   threshold rejection, all four terminal states, cooldown enforcement, permissionless
-  checking, and the worked consumer example `ThresholdGatedAction`).
+  checking, the worked consumer example `ThresholdGatedAction`, plus 6 new regression
+  tests for the review fix: the stored timestamp being the round's own consensus
+  value, cooldown boundary behavior decided against that same value, a rejected
+  cooldown call writing no state at all, and canonical `extracted_value` enforcement).
 - `pytest tests/integration/ --network=studionet` against the live deployment — all 3
   tests passed, covering every real verdict category:
   - `test_full_surface_drives_create_and_check_and_reads_every_view`: real judged
@@ -77,7 +118,11 @@ creator-declared APIs). Full writeup in `DESIGN.md` §4a and §5a.
     `SUCCESS`/`ACCEPTED` at the GenVM/consensus level.
   - Every judged round across every run has completed `SUCCESS`/`ACCEPTED` — zero
     fatal errors, zero undetermined rounds.
+  - These runs also confirm the review fix end to end: every settled feed's
+    `last_checked_at` carries the round's own single consensus timestamp (e.g.
+    `2026-08-30T16:10:52.371007+00:00`), and every `extracted_value` came back in
+    canonical bare-decimal form (`78853`, `78793`, `""` for the errored feed).
 
 ## Character count check
 
-898/1000 characters (verified with `len()` in Python, whitespace-normalized).
+937/1000 characters (verified with `len()` in Python, whitespace-normalized).
