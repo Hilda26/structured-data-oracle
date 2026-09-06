@@ -145,13 +145,18 @@ underlying primitive.
 
 ## Deployment
 
-- Deployed StudioNet address: `0x51C695A81eA8c9Bb13923cE679B2894B9f0f2AFD` (redeployed
-  with the consensus-timestamp fix; supersedes
-  `0x08be9d9316fBB505d6537dA73a8810CeC018965B`, which read a local wall clock outside
-  the judged flow — see `REVIEW.md`)
-- Explorer: https://explorer-studio.genlayer.com/address/0x51C695A81eA8c9Bb13923cE679B2894B9f0f2AFD
+- Deployed StudioNet address: `0x541d81E6386A69925F23dCd6Abaa630E6a97638f` (redeployed
+  2026-09-06 to give an unambiguous, freshly-verified address for a review appeal;
+  functionally identical to `0x51C695A81eA8c9Bb13923cE679B2894B9f0f2AFD`, both carrying
+  the consensus-timestamp fix. Neither should be confused with
+  `0x08be9d9316fBB505d6537dA73a8810CeC018965B`, the original defective deployment that
+  read a local wall clock outside the judged flow — see `REVIEW.md`. The deployed code
+  at this address was fetched directly with `genlayer code` and confirmed to contain
+  exactly one `datetime.now()` call, inside `leader()`, with no `_now_iso()` helper
+  anywhere.)
+- Explorer: https://explorer-studio.genlayer.com/address/0x541d81E6386A69925F23dCd6Abaa630E6a97638f
 - Studio import: open [studio.genlayer.com](https://studio.genlayer.com) → "Import
-  contract" → paste `0x51C695A81eA8c9Bb13923cE679B2894B9f0f2AFD`.
+  contract" → paste `0x541d81E6386A69925F23dCd6Abaa630E6a97638f`.
 
 ## Measured on live consensus
 
@@ -160,14 +165,22 @@ this contract can reach — not just the easy case:
 
 - **`test_full_surface_drives_create_and_check_and_reads_every_view`**: a feed
   watching "the current price of Bitcoin in US dollars" from CoinGecko's live public
-  API against `> 1` resolved to `extracted_value: "78853"`, `state: CONDITION_MET`.
+  API against `> 1` resolved to `extracted_value: "79961"`, `state: CONDITION_MET`.
   Cooldown enforcement and `create_feed` input-validation reverts also verified
   on-chain in the same run.
 - **`test_check_feed_reaches_condition_not_met_on_a_real_impossible_threshold`**: the
   same real API, condition flipped to `< 1` (something Bitcoin's price can never
   satisfy) — the judged round still correctly *found* the real value
-  (`extracted_value: "78793"`) and correctly reported `CONDITION_NOT_MET`, proving the
-  negative path is a genuine judgment, not a default.
+  (`extracted_value: "79943"`) and correctly reported `CONDITION_NOT_MET`, proving the
+  negative path is a genuine judgment, not a default. (First attempt against this
+  address hit a genuine, transient CoinGecko fetch failure — `execution_result:
+  SUCCESS` and `raw_error: None` on every validator, the leader's own envelope was
+  `{"verdict": "__FETCH_ERROR__", ...}` — almost certainly CoinGecko rate-limiting two
+  rapid requests from the same GenVM egress path. A retry seconds later succeeded
+  cleanly; this is the same "real fetch failure absorbed as contract-level state, never
+  a GenVM fault" behavior the unreachable-API test below exists to prove, just
+  surfacing unprompted against a normally-reliable API instead of a deliberately dead
+  one.)
 - **`test_check_feed_with_unreachable_api_completes_without_genvm_or_consensus_error`**:
   a genuinely dead domain reached `state: ERRORED` with `extracted_value` cleared,
   while the transaction itself still completed `SUCCESS`/`ACCEPTED` at the GenVM and

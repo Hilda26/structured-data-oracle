@@ -161,22 +161,47 @@ clean on both the contract and the worked example.
 ## Deployment
 
 - **Old (defective) address:** `0x08be9d9316fBB505d6537dA73a8810CeC018965B` — superseded.
-- **New (fixed) address:** `0x51C695A81eA8c9Bb13923cE679B2894B9f0f2AFD`
-- Explorer: https://explorer-studio.genlayer.com/address/0x51C695A81eA8c9Bb13923cE679B2894B9f0f2AFD
+- **First fixed address:** `0x51C695A81eA8c9Bb13923cE679B2894B9f0f2AFD` — correct, but see
+  the appeal note below.
+- **Current fixed address:** `0x541d81E6386A69925F23dCd6Abaa630E6a97638f` (2026-09-06)
+- Explorer: https://explorer-studio.genlayer.com/address/0x541d81E6386A69925F23dCd6Abaa630E6a97638f
 
 All 3 integration tests re-run against the new deployment on StudioNet, with no
 regressions — and the live results confirm the fix end to end:
 
 | Test | Result | `last_checked_at` | `extracted_value` |
 |---|---|---|---|
-| full surface (`> 1`) | `CONDITION_MET` | `2026-08-30T16:10:52.371007+00:00` | `78853` |
-| impossible threshold (`< 1`) | `CONDITION_NOT_MET` | `2026-08-30T16:12:42.532152+00:00` | `78793` |
-| unreachable API | `ERRORED` | `2026-08-30T16:13:25.949251+00:00` | `""` |
+| full surface (`> 1`) | `CONDITION_MET` | `2026-09-06T12:55:33.770535+00:00` | `79961` |
+| impossible threshold (`< 1`) | `CONDITION_NOT_MET` | `2026-09-06T12:59:08.150841+00:00` | `79943` |
+| unreachable API | `ERRORED` | `2026-09-06T12:57:45.604994+00:00` | `""` |
 
 Every settled feed's `last_checked_at` carries the round's own single consensus
 timestamp, and every `extracted_value` came back in canonical bare-decimal form.
 Every judged round completed `SUCCESS`/`ACCEPTED` at the GenVM and consensus level —
-zero fatal errors, zero undetermined rounds.
+zero fatal errors, zero undetermined rounds. (The impossible-threshold test's first
+attempt against this address hit a genuine, transient CoinGecko fetch failure —
+`execution_result: SUCCESS`, `raw_error: None` on every validator, the leader's own
+envelope was `{"verdict": "__FETCH_ERROR__", ...}` — almost certainly CoinGecko
+rate-limiting two rapid requests from the same GenVM egress path. A retry seconds later
+passed cleanly; the table above reflects that passing run.)
+
+## Appeal — a second review flagged the deployment as still defective
+
+A later review stated: *"the submitted Explorer deployment still runs the older
+cooldown path with local wall-clock reads and therefore does not match the corrected
+source."* This was checked directly rather than assumed away: fetching
+`0x51C695A81eA8c9Bb13923cE679B2894B9f0f2AFD`'s actual deployed code with `genlayer
+code` returned exactly one `datetime.now()` call, inside `leader()`, no `_now_iso()`
+anywhere — i.e., that address was already correct. Fetching the *original* defective
+address, `0x08be9d9316fBB505d6537dA73a8810CeC018965B`, the same way does show the
+`_now_iso()` helper and the two separate local wall-clock reads the review described.
+The most likely explanation is that the second review evaluated the original address
+rather than the corrected one this submission actually named.
+
+To remove any ambiguity, the contract was redeployed fresh to
+`0x541d81E6386A69925F23dCd6Abaa630E6a97638f`, its deployed code was independently
+re-verified with `genlayer code` immediately after deployment, and the full
+integration suite above was re-run against it from a clean slate.
 
 ## Files changed
 

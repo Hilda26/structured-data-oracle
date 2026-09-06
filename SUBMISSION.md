@@ -24,12 +24,35 @@ passing live StudioNet tests.
 - GitHub repo: https://github.com/Hilda26/structured-data-oracle (no AI attribution —
   verified via `git log -1 --format='%B' | grep -i "co-authored\|claude\|generated
   with"` → no match, on every commit)
-- Explorer contract URL: https://explorer-studio.genlayer.com/address/0x51C695A81eA8c9Bb13923cE679B2894B9f0f2AFD
+- Explorer contract URL: https://explorer-studio.genlayer.com/address/0x541d81E6386A69925F23dCd6Abaa630E6a97638f
 - Studio import URL: open studio.genlayer.com → Import contract →
-  `0x51C695A81eA8c9Bb13923cE679B2894B9f0f2AFD`
-- Deployed StudioNet address: `0x51C695A81eA8c9Bb13923cE679B2894B9f0f2AFD`
-  (redeployed with the consensus-timestamp fix; supersedes
-  `0x08be9d9316fBB505d6537dA73a8810CeC018965B`)
+  `0x541d81E6386A69925F23dCd6Abaa630E6a97638f`
+- Deployed StudioNet address: `0x541d81E6386A69925F23dCd6Abaa630E6a97638f`
+  (redeployed with the consensus-timestamp fix; see the Appeal section below for why
+  this supersedes the previously-submitted `0x51C695A81eA8c9Bb13923cE679B2894B9f0f2AFD`,
+  and both supersede the original defective `0x08be9d9316fBB505d6537dA73a8810CeC018965B`)
+
+## Appeal — 2026-09-06
+
+The review stated: *"the submitted Explorer deployment still runs the older cooldown
+path with local wall-clock reads and therefore does not match the corrected source."*
+
+The repository and the previously-submitted address
+(`0x51C695A81eA8c9Bb13923cE679B2894B9f0f2AFD`) were both already correct — verified just
+now by fetching that address's actual deployed code directly with `genlayer code
+0x51C695A81eA8c9Bb13923cE679B2894B9f0f2AFD`, which returns exactly one `datetime.now()`
+call, inside `leader()`, with no `_now_iso()` helper. For direct comparison, the same
+command against the original defective address, `0x08be9d9316fBB505d6537dA73a8810CeC018965B`,
+does return the `_now_iso()` helper and two separate local wall-clock reads — the exact
+pattern the review described. It's likely the review evaluated that original address
+rather than the corrected one actually named in this submission.
+
+To remove any doubt, the contract has been redeployed fresh to
+`0x541d81E6386A69925F23dCd6Abaa630E6a97638f` (2026-09-06, unanimous validator
+agreement). Its deployed code was independently re-verified the same way immediately
+after deployment, and all 3 integration tests pass against it on live StudioNet
+consensus — see "Measured on live consensus" in `README.md` for the actual verdicts and
+extracted values. Please evaluate this address.
 
 ## Review addressed — consensus-bound time value
 
