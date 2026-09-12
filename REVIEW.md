@@ -212,3 +212,98 @@ integration suite above was re-run against it from a clean slate.
 - `DESIGN.md` — new §3a (consensus-bound time) and §3b (canonical `extracted_value`).
 - `README.md` — updated safety-properties table, test count, deployment address, and
   live consensus results.
+
+## A third review: excluding observed_at from comparison had left it completely
+   unbound
+
+> The reviewed oracle still does not independently verify the timestamp that controls
+> its cooldown. In the repository version, validators are explicitly told to ignore
+> observed_at, so a far-future leader timestamp can pass with the same verdict, become
+> last_checked_at, and block later checks; the supplied deployment also uses
+> validator-local clock reads outside consensus. Bind the behavior-changing time value
+> to independently verified evidence, then provide matching repository and Explorer
+> source.
+
+This one was correct, and the prior appeal above did not address it - it addressed a
+different claim (a stale deployment) from an earlier review. This is a genuinely
+distinct defect in the same area, found on the version that already carried the
+consensus-bound-time fix.
+
+**Root cause.** Section 3a's fix bound the cooldown decision and `last_checked_at` to
+a single leader-proposed `observed_at`, and correctly told validators never to treat
+two close but non-identical readings as a disagreement. But "never compare it" had
+been implemented as "nothing constrains the accepted value at all":
+
+```
+"... these timestamps will naturally differ between responses and are NEVER part of
+the equivalence comparison - compare only the verdict, and ignore 'observed_at'
+entirely when deciding whether two responses are equivalent."
+```
+
+A leader could propose an `observed_at` arbitrarily far in the future. As long as its
+verdict matched, the round would be accepted, that value would become
+`last_checked_at`, and every later `check_feed` call would compute `elapsed` against a
+timestamp no genuine future call could ever catch up to - a permanent denial of
+service on that feed from a single bad round.
+
+**Fix - two complementary halves, since the problem has two directions:**
+
+1. **Future-ward**, bound to independently verified evidence in `JUDGE_PRINCIPLE`
+   itself:
+
+   ```
+   "... Each response also carries an 'observed_at' timestamp recording when it
+   fetched the API. Two such timestamps a few seconds or minutes apart are both
+   normal and NOT a disagreement ... But this field is not exempt from scrutiny: you
+   have your own sense, from your own independent fetch, of what moment 'now'
+   actually is. If the other response's 'observed_at' is wildly inconsistent with
+   that - hours, days, or years away ... the two responses are NOT equivalent,
+   regardless of whether their verdicts match ..."
+   ```
+
+   This is deliberately enforced through the equivalence mechanism, not contract
+   code, because contract code has no independent time reference to check a future
+   value against without reading a local clock - which would reintroduce section 3a's
+   own defect on a new axis. Each validator's own honestly-executed fetch, at its own
+   real moment, is the only genuinely independent evidence this runtime has, since no
+   deterministic on-chain clock exists on the pinned runner (§3a already documents
+   probing `gl.message`/`gl.vm` directly and confirming neither exists).
+
+2. **Past-ward**, caught deterministically, for free, against already-committed
+   on-chain state - no clock read needed for this half at all:
+
+   ```python
+   if int(feed.check_count) > 0:
+       last = _parse_iso(feed.last_checked_at)
+       observed_dt = _parse_iso(observed_at)
+       if last is not None and observed_dt is not None and observed_dt <= last:
+           raise gl.vm.UserError("round timestamp did not advance past this feed's last recorded time")
+   ```
+
+**An honest limitation, not a claimed proof.** The future-ward half is enforced by an
+LLM judging "wildly inconsistent" against natural-language instruction, not a hard
+numeric tolerance - a moderately-wrong timestamp might not trip language keyed to
+"hours, days, or years." This is the same trust model this entire portfolio already
+relies on for every verdict a judged round reaches, not a new or weaker standard
+invented for this fix, but it is real and worth stating rather than hiding. It also
+cannot be exercised in direct-mode testing, which trusts a single leader execution by
+construction rather than genuinely reconciling multiple independent validators - only
+live consensus can actually prove it, and both live integration tests below did pass
+against the redeployed address, including the one that exercises real cooldown timing
+end to end.
+
+**Tests added:** `test_check_feed_rejects_a_round_timestamp_at_or_before_the_last_recorded_time`,
+`test_check_feed_rejects_a_round_timestamp_before_the_last_recorded_time`,
+`test_check_feed_accepts_a_round_timestamp_that_advances_even_by_one_second` - all new,
+all passing, plus two pre-existing cooldown tests adjusted to isolate the cooldown
+rejection they actually test from the new monotonicity guard (direct mode's unwarped
+clock returns the identical instant on back-to-back calls, which the new guard
+correctly, if incidentally, also rejects).
+
+**Deployment:** redeployed to `0x25E2C67fc69Dbd338749D69363d6129375fe728c`
+(2026-09-12, unanimous validator agreement), on-chain code independently re-verified
+with `genlayer code` immediately after deployment - confirmed the new equivalence
+wording and monotonicity guard are present, and confirmed zero occurrences of the old
+"ignore observed_at entirely" phrasing anywhere in the deployed bytecode. All 32 direct
+tests pass, lint is clean, and all 3 integration tests pass against this address on
+live consensus.

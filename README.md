@@ -133,10 +133,11 @@ underlying primitive.
 
 ## Testing
 
-- **Direct-mode** (`tests/direct/`, `pytest tests/direct/`): 29 tests, no network, no
+- **Direct-mode** (`tests/direct/`, `pytest tests/direct/`): 32 tests, no network, no
   live consensus — fast feedback on every deterministic branch, every failure/
-  abstention path (including the `NOT_FOUND` vs `CONDITION_NOT_MET` distinction), and
-  the worked consumer example, using gltest's built-in `mock_web`/`mock_llm`.
+  abstention path (including the `NOT_FOUND` vs `CONDITION_NOT_MET` distinction), the
+  deterministic half of the timestamp-monotonicity guard, and the worked consumer
+  example, using gltest's built-in `mock_web`/`mock_llm`.
 - **Integration** (`tests/integration/`, `pytest tests/integration/ --network=studionet`):
   3 tests, requires `STRUCTUREDDATAORACLE_ADDRESS` set to a real StudioNet deployment;
   drives `create_feed` and real judged `check_feed` rounds covering `CONDITION_MET`,
@@ -145,18 +146,44 @@ underlying primitive.
 
 ## Deployment
 
-- Deployed StudioNet address: `0x541d81E6386A69925F23dCd6Abaa630E6a97638f` (redeployed
-  2026-09-06 to give an unambiguous, freshly-verified address for a review appeal;
-  functionally identical to `0x51C695A81eA8c9Bb13923cE679B2894B9f0f2AFD`, both carrying
-  the consensus-timestamp fix. Neither should be confused with
-  `0x08be9d9316fBB505d6537dA73a8810CeC018965B`, the original defective deployment that
-  read a local wall clock outside the judged flow — see `REVIEW.md`. The deployed code
-  at this address was fetched directly with `genlayer code` and confirmed to contain
-  exactly one `datetime.now()` call, inside `leader()`, with no `_now_iso()` helper
-  anywhere.)
-- Explorer: https://explorer-studio.genlayer.com/address/0x541d81E6386A69925F23dCd6Abaa630E6a97638f
+- Deployed StudioNet address: `0x25E2C67fc69Dbd338749D69363d6129375fe728c` (redeployed
+  2026-09-12 for the timestamp-binding fix described below. Supersedes
+  `0x541d81E6386A69925F23dCd6Abaa630E6a97638f` and `0x51C695A81eA8c9Bb13923cE679B2894B9f0f2AFD`,
+  and none of these should be confused with `0x08be9d9316fBB505d6537dA73a8810CeC018965B`,
+  the original defective deployment that read a local wall clock outside the judged
+  flow — see `REVIEW.md`. The deployed code at this address was fetched directly with
+  `genlayer code` and confirmed to contain exactly one `datetime.now()` call, inside
+  `leader()`, the new timestamp-binding equivalence wording, and the new deterministic
+  monotonicity guard — with zero occurrences of the old "ignore observed_at entirely"
+  phrasing anywhere in the deployed bytecode.)
+- Explorer: https://explorer-studio.genlayer.com/address/0x25E2C67fc69Dbd338749D69363d6129375fe728c
 - Studio import: open [studio.genlayer.com](https://studio.genlayer.com) → "Import
-  contract" → paste `0x541d81E6386A69925F23dCd6Abaa630E6a97638f`.
+  contract" → paste `0x25E2C67fc69Dbd338749D69363d6129375fe728c`.
+
+## A second review: excluding observed_at from comparison had left it unbound
+
+> The reviewed oracle still does not independently verify the timestamp that controls
+> its cooldown. In the repository version, validators are explicitly told to ignore
+> observed_at, so a far-future leader timestamp can pass with the same verdict, become
+> last_checked_at, and block later checks; the supplied deployment also uses
+> validator-local clock reads outside consensus. Bind the behavior-changing time value
+> to independently verified evidence, then provide matching repository and Explorer
+> source.
+
+Real, and fixed with two complementary changes - full technical rationale in
+`DESIGN.md` §3c and the review response in `REVIEW.md`:
+
+1. `JUDGE_PRINCIPLE` no longer tells validators to ignore `observed_at` outright. It
+   now binds the leader's proposed timestamp to each validator's own independently
+   fetched sense of "now" - the only genuinely independent time evidence this runtime
+   has, since no deterministic on-chain clock exists on the pinned runner (confirmed by
+   directly probing its attribute surface). A wildly inconsistent value - the far-future
+   case the review named - is now a real disagreement, not something validators are
+   told to overlook.
+2. `check_feed` deterministically rejects any accepted `observed_at` that does not
+   strictly exceed the feed's own `last_checked_at`, checked purely against
+   already-committed on-chain state - closing the complementary past-regression
+   direction for free, with no clock read at all.
 
 ## Measured on live consensus
 
@@ -165,22 +192,14 @@ this contract can reach — not just the easy case:
 
 - **`test_full_surface_drives_create_and_check_and_reads_every_view`**: a feed
   watching "the current price of Bitcoin in US dollars" from CoinGecko's live public
-  API against `> 1` resolved to `extracted_value: "79961"`, `state: CONDITION_MET`.
-  Cooldown enforcement and `create_feed` input-validation reverts also verified
-  on-chain in the same run.
+  API against `> 1` resolved to `extracted_value: "77289"`, `state: CONDITION_MET`.
+  Cooldown enforcement, the new timestamp-binding equivalence wording, and
+  `create_feed` input-validation reverts all verified on-chain in the same run.
 - **`test_check_feed_reaches_condition_not_met_on_a_real_impossible_threshold`**: the
   same real API, condition flipped to `< 1` (something Bitcoin's price can never
   satisfy) — the judged round still correctly *found* the real value
-  (`extracted_value: "79943"`) and correctly reported `CONDITION_NOT_MET`, proving the
-  negative path is a genuine judgment, not a default. (First attempt against this
-  address hit a genuine, transient CoinGecko fetch failure — `execution_result:
-  SUCCESS` and `raw_error: None` on every validator, the leader's own envelope was
-  `{"verdict": "__FETCH_ERROR__", ...}` — almost certainly CoinGecko rate-limiting two
-  rapid requests from the same GenVM egress path. A retry seconds later succeeded
-  cleanly; this is the same "real fetch failure absorbed as contract-level state, never
-  a GenVM fault" behavior the unreachable-API test below exists to prove, just
-  surfacing unprompted against a normally-reliable API instead of a deliberately dead
-  one.)
+  (`extracted_value: "77283"`) and correctly reported `CONDITION_NOT_MET`, proving the
+  negative path is a genuine judgment, not a default.
 - **`test_check_feed_with_unreachable_api_completes_without_genvm_or_consensus_error`**:
   a genuinely dead domain reached `state: ERRORED` with `extracted_value` cleared,
   while the transaction itself still completed `SUCCESS`/`ACCEPTED` at the GenVM and

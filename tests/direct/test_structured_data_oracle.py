@@ -190,11 +190,20 @@ def test_check_feed_discards_an_out_of_band_verdict_label(direct_deploy, direct_
 
 
 def test_check_feed_rejects_before_cooldown_elapses(direct_deploy, direct_vm, direct_owner):
+    from datetime import datetime, timedelta
+
     c = _deploy(direct_deploy, direct_vm, direct_owner)
     feed_id = _create_feed(c, direct_vm, direct_owner, check_cooldown_seconds=3600)
     _mock_response(direct_vm, '{"rate": 1.08}')
     _mock_verdict(direct_vm, '{"verdict": "CONDITION_MET", "extracted_value": "1.08"}')
     c.check_feed(feed_id)
+
+    # A small forward warp - enough to clear the monotonicity guard
+    # without clearing the cooldown itself - isolates this test to the
+    # cooldown rejection specifically.
+    first = c.get_feed(feed_id)["last_checked_at"]
+    first_dt = datetime.fromisoformat(first.replace("Z", "+00:00"))
+    warp_to(direct_vm, (first_dt + timedelta(seconds=1)).isoformat())
     with direct_vm.expect_revert("cooldown"):
         c.check_feed(feed_id)
 
@@ -304,6 +313,10 @@ def test_a_rejected_cooldown_call_writes_no_state_at_all(direct_deploy, direct_v
     c.check_feed(feed_id)
     before = c.get_feed(feed_id)
 
+    # A small forward warp - enough to clear the monotonicity guard
+    # without clearing the cooldown itself - isolates this test to the
+    # cooldown rejection specifically.
+    warp_to(direct_vm, "2026-03-01T12:00:01+00:00")
     direct_vm.clear_mocks()
     _mock_response(direct_vm, '{"rate": 9.99}')
     _mock_verdict(direct_vm, '{"verdict": "CONDITION_NOT_MET", "extracted_value": "9.99"}')
@@ -384,6 +397,89 @@ def test_check_feed_after_errored_can_be_retried_by_anyone_once_cooldown_allows(
     direct_vm.sender = direct_alice
     c.check_feed(feed_id)
     assert c.get_feed(feed_id)["state"] == "CONDITION_MET"
+
+
+# ---------------------------------------------------------------------
+# Timestamp monotonicity - the review correction: excluding observed_at
+# from cross-validator comparison (correct - each validator's own fetch
+# legitimately differs) had been implemented as excluding it from ALL
+# scrutiny, with nothing else constraining the accepted value. This
+# deterministic half of the fix catches a leader-proposed timestamp that
+# regresses behind this feed's own prior recorded time; the other half
+# (binding it to what other validators can independently tell "now" is,
+# which is what actually catches an implausible FUTURE value) lives in
+# JUDGE_PRINCIPLE and can only be exercised on live multi-validator
+# consensus, not in direct mode's single-leader-trusting execution.
+# ---------------------------------------------------------------------
+
+
+def test_check_feed_rejects_a_round_timestamp_at_or_before_the_last_recorded_time(
+    direct_deploy, direct_vm, direct_owner
+):
+    c = _deploy(direct_deploy, direct_vm, direct_owner)
+    feed_id = _create_feed(c, direct_vm, direct_owner, check_cooldown_seconds=1)
+    _mock_response(direct_vm, '{"rate": 1.08}')
+    _mock_verdict(direct_vm, '{"verdict": "CONDITION_MET", "extracted_value": "1.08"}')
+    c.check_feed(feed_id)
+    before = c.get_feed(feed_id)
+
+    # no warp at all - direct mode's clock returns the exact same instant
+    # on this second call, which is not an advance
+    direct_vm.clear_mocks()
+    _mock_response(direct_vm, '{"rate": 9.99}')
+    _mock_verdict(direct_vm, '{"verdict": "CONDITION_NOT_MET", "extracted_value": "9.99"}')
+    with direct_vm.expect_revert("did not advance past this feed's last recorded time"):
+        c.check_feed(feed_id)
+    assert c.get_feed(feed_id) == before
+
+
+def test_check_feed_rejects_a_round_timestamp_before_the_last_recorded_time(
+    direct_deploy, direct_vm, direct_owner
+):
+    from datetime import datetime, timedelta
+
+    c = _deploy(direct_deploy, direct_vm, direct_owner)
+    feed_id = _create_feed(c, direct_vm, direct_owner, check_cooldown_seconds=1)
+    _mock_response(direct_vm, '{"rate": 1.08}')
+    _mock_verdict(direct_vm, '{"verdict": "CONDITION_MET", "extracted_value": "1.08"}')
+    c.check_feed(feed_id)
+    before = c.get_feed(feed_id)
+
+    # a leader proposing a timestamp from before the feed's own recorded
+    # history - the case this guard exists to catch, regardless of
+    # whether it comes from a manipulated leader or a genuinely
+    # desynchronized clock on whichever validator ends up leading a
+    # future round
+    last = c.get_feed(feed_id)["last_checked_at"]
+    last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+    warp_to(direct_vm, (last_dt - timedelta(seconds=10)).isoformat())
+    direct_vm.clear_mocks()
+    _mock_response(direct_vm, '{"rate": 9.99}')
+    _mock_verdict(direct_vm, '{"verdict": "CONDITION_NOT_MET", "extracted_value": "9.99"}')
+    with direct_vm.expect_revert("did not advance past this feed's last recorded time"):
+        c.check_feed(feed_id)
+    assert c.get_feed(feed_id) == before
+
+
+def test_check_feed_accepts_a_round_timestamp_that_advances_even_by_one_second(
+    direct_deploy, direct_vm, direct_owner
+):
+    from datetime import datetime, timedelta
+
+    c = _deploy(direct_deploy, direct_vm, direct_owner)
+    feed_id = _create_feed(c, direct_vm, direct_owner, check_cooldown_seconds=1)
+    _mock_response(direct_vm, '{"rate": 1.08}')
+    _mock_verdict(direct_vm, '{"verdict": "CONDITION_MET", "extracted_value": "1.08"}')
+    c.check_feed(feed_id)
+
+    last = c.get_feed(feed_id)["last_checked_at"]
+    last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+    warp_to(direct_vm, (last_dt + timedelta(seconds=1)).isoformat())
+    direct_vm.clear_mocks()
+    _mock_response(direct_vm, '{"rate": 9.99}')
+    _mock_verdict(direct_vm, '{"verdict": "CONDITION_NOT_MET", "extracted_value": "9.99"}')
+    c.check_feed(feed_id)
+    assert c.get_feed(feed_id)["check_count"] == 2
 
 
 # ---------------------------------------------------------------------

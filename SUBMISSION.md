@@ -24,13 +24,55 @@ passing live StudioNet tests.
 - GitHub repo: https://github.com/Hilda26/structured-data-oracle (no AI attribution —
   verified via `git log -1 --format='%B' | grep -i "co-authored\|claude\|generated
   with"` → no match, on every commit)
-- Explorer contract URL: https://explorer-studio.genlayer.com/address/0x541d81E6386A69925F23dCd6Abaa630E6a97638f
+- Explorer contract URL: https://explorer-studio.genlayer.com/address/0x25E2C67fc69Dbd338749D69363d6129375fe728c
 - Studio import URL: open studio.genlayer.com → Import contract →
-  `0x541d81E6386A69925F23dCd6Abaa630E6a97638f`
-- Deployed StudioNet address: `0x541d81E6386A69925F23dCd6Abaa630E6a97638f`
-  (redeployed with the consensus-timestamp fix; see the Appeal section below for why
-  this supersedes the previously-submitted `0x51C695A81eA8c9Bb13923cE679B2894B9f0f2AFD`,
-  and both supersede the original defective `0x08be9d9316fBB505d6537dA73a8810CeC018965B`)
+  `0x25E2C67fc69Dbd338749D69363d6129375fe728c`
+- Deployed StudioNet address: `0x25E2C67fc69Dbd338749D69363d6129375fe728c`
+  (redeployed with the timestamp-binding fix; see the Appeal section below. Supersedes
+  `0x541d81E6386A69925F23dCd6Abaa630E6a97638f` and `0x51C695A81eA8c9Bb13923cE679B2894B9f0f2AFD`,
+  and all three supersede the original defective `0x08be9d9316fBB505d6537dA73a8810CeC018965B`)
+
+## Appeal — 2026-09-12
+
+The review stated: *"The reviewed oracle still does not independently verify the
+timestamp that controls its cooldown. In the repository version, validators are
+explicitly told to ignore observed_at, so a far-future leader timestamp can pass with
+the same verdict, become last_checked_at, and block later checks; the supplied
+deployment also uses validator-local clock reads outside consensus. Bind the
+behavior-changing time value to independently verified evidence, then provide matching
+repository and Explorer source."*
+
+This was a real, distinct defect - not the same issue the 2026-09-06 appeal addressed
+(that one was about a stale deployment address; this one is a genuine gap in the
+timestamp logic itself, present on the already-corrected version too). Fixed with two
+complementary changes:
+
+1. `JUDGE_PRINCIPLE` no longer instructs validators to ignore `observed_at` outright.
+   It now requires the leader's proposed timestamp to be plausible against each
+   validator's own independently-fetched sense of "now" - the only genuinely
+   independent time evidence available, since no deterministic on-chain clock exists
+   on this runner (confirmed by directly probing `gl.message`/`gl.vm`'s actual
+   attribute surface). A wildly inconsistent value - the far-future case the review
+   named - is now a real disagreement.
+2. `check_feed` deterministically rejects any accepted `observed_at` that does not
+   strictly exceed the feed's own `last_checked_at`, checked purely against
+   already-committed on-chain state.
+
+Stated honestly rather than oversold: the future-ward half is enforced through the
+same LLM-judged equivalence mechanism this entire portfolio already relies on for
+every verdict, not a hard numeric tolerance, so it cannot be exercised in direct-mode
+testing (which trusts a single leader execution by construction). It was verified
+live instead - both integration tests pass against the redeployed address on real
+multi-validator consensus, including the one that exercises real cooldown timing end
+to end. Full rationale in `DESIGN.md` §3c and `REVIEW.md`.
+
+Redeployed to `0x25E2C67fc69Dbd338749D69363d6129375fe728c` (2026-09-12, unanimous
+validator agreement), on-chain code independently re-verified with `genlayer code`
+immediately after deployment - confirmed both the new equivalence wording and the new
+monotonicity guard are present, and confirmed zero occurrences of the old "ignore
+observed_at entirely" phrasing anywhere in the deployed bytecode. 32/32 direct tests
+pass (3 new), lint clean, all 3 integration tests pass live. Please evaluate this
+address.
 
 ## Appeal — 2026-09-06
 
