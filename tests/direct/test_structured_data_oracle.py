@@ -483,6 +483,157 @@ def test_check_feed_accepts_a_round_timestamp_that_advances_even_by_one_second(
 
 
 # ---------------------------------------------------------------------
+# validator_fn itself - gltest's direct mode calls leader_fn() exactly
+# once and never invokes validator_fn as part of an ordinary contract
+# call; it only records it for later inspection. Every test above this
+# point proves check_feed's OWN logic is correct, but proves nothing
+# about validator_fn, since it never actually runs during them. These
+# tests use direct_vm.run_validator() to genuinely execute the captured
+# validator_fn against a crafted "leader" result - including the exact
+# far-future-timestamp attack the review described - which is the only
+# way to prove the fix's actual behavior rather than assume it from the
+# fact that check_feed's happy path still works.
+# ---------------------------------------------------------------------
+
+
+def test_validator_agrees_with_an_honest_leader_result(direct_deploy, direct_vm, direct_owner):
+    c = _deploy(direct_deploy, direct_vm, direct_owner)
+    feed_id = _create_feed(c, direct_vm, direct_owner)
+    _mock_response(direct_vm, '{"rate": 1.08}')
+    _mock_verdict(direct_vm, '{"verdict": "CONDITION_MET", "extracted_value": "1.08"}')
+    c.check_feed(feed_id)
+
+    # Same mocks are still active, so the validator's own independent
+    # re-run of leader_fn() reproduces the same verdict and a timestamp
+    # within the clock-skew tolerance of the stored leader result.
+    assert direct_vm.run_validator() is True
+
+
+def test_validator_rejects_a_leader_claiming_a_far_future_timestamp(direct_deploy, direct_vm, direct_owner):
+    """
+    Directly reproduces the attack the review described: a leader whose
+    verdict matches what an honest validator would independently reach,
+    but whose claimed observed_at is wildly in the future. This is a real
+    invocation of the real validator_fn against a crafted malicious
+    leader result, not a mocked assertion - the exact scenario that must
+    be rejected for the fix to be real.
+    """
+    import json
+
+    c = _deploy(direct_deploy, direct_vm, direct_owner)
+    feed_id = _create_feed(c, direct_vm, direct_owner)
+    _mock_response(direct_vm, '{"rate": 1.08}')
+    _mock_verdict(direct_vm, '{"verdict": "CONDITION_MET", "extracted_value": "1.08"}')
+    c.check_feed(feed_id)
+
+    malicious_leader_result = json.dumps(
+        {"verdict": "CONDITION_MET", "extracted_value": "1.08", "observed_at": "3000-01-01T00:00:00+00:00"}
+    )
+    assert direct_vm.run_validator(leader_result=malicious_leader_result) is False
+
+
+def test_validator_rejects_a_leader_claiming_a_far_past_timestamp(direct_deploy, direct_vm, direct_owner):
+    import json
+
+    c = _deploy(direct_deploy, direct_vm, direct_owner)
+    feed_id = _create_feed(c, direct_vm, direct_owner)
+    _mock_response(direct_vm, '{"rate": 1.08}')
+    _mock_verdict(direct_vm, '{"verdict": "CONDITION_MET", "extracted_value": "1.08"}')
+    c.check_feed(feed_id)
+
+    malicious_leader_result = json.dumps(
+        {"verdict": "CONDITION_MET", "extracted_value": "1.08", "observed_at": "2000-01-01T00:00:00+00:00"}
+    )
+    assert direct_vm.run_validator(leader_result=malicious_leader_result) is False
+
+
+def test_validator_rejects_a_leader_whose_verdict_disagrees_with_its_own_independent_run(
+    direct_deploy, direct_vm, direct_owner
+):
+    import json
+
+    c = _deploy(direct_deploy, direct_vm, direct_owner)
+    feed_id = _create_feed(c, direct_vm, direct_owner)
+    _mock_response(direct_vm, '{"rate": 1.08}')
+    _mock_verdict(direct_vm, '{"verdict": "CONDITION_MET", "extracted_value": "1.08"}')
+    c.check_feed(feed_id)
+
+    stored = c.get_feed(feed_id)
+    dishonest_leader_result = json.dumps(
+        {"verdict": "CONDITION_NOT_MET", "extracted_value": "1.08", "observed_at": stored["last_checked_at"]}
+    )
+    assert direct_vm.run_validator(leader_result=dishonest_leader_result) is False
+
+
+def test_validator_agrees_when_both_independently_hit_the_same_fetch_error(direct_deploy, direct_vm, direct_owner):
+    """No mocks configured at all - both the original call and the
+    validator's own internal re-run of leader_fn() independently hit the
+    same real fetch failure and land on the same __FETCH_ERROR__
+    sentinel, which must be treated as agreement, not a disagreement to
+    punish."""
+    c = _deploy(direct_deploy, direct_vm, direct_owner)
+    feed_id = _create_feed(c, direct_vm, direct_owner)
+    c.check_feed(feed_id)
+    assert c.get_feed(feed_id)["state"] == "ERRORED"
+
+    assert direct_vm.run_validator() is True
+
+
+def test_validator_accepts_a_timestamp_exactly_at_the_clock_skew_boundary(direct_deploy, direct_vm, direct_owner):
+    """Precise arithmetic proof, not just a qualitative 'far future'
+    example: a leader-claimed timestamp exactly MAX_CLOCK_SKEW_SECONDS
+    (300s) ahead of the validator's own independently-observed moment is
+    still accepted; one second further is not (see the next test)."""
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    c = _deploy(direct_deploy, direct_vm, direct_owner)
+    feed_id = _create_feed(c, direct_vm, direct_owner)
+    _mock_response(direct_vm, '{"rate": 1.08}')
+    _mock_verdict(direct_vm, '{"verdict": "CONDITION_MET", "extracted_value": "1.08"}')
+    c.check_feed(feed_id)
+
+    # Pin the validator's own re-run to a known instant, so the skew
+    # against the crafted leader result is exact and provable.
+    known_now = "2026-06-01T00:00:00+00:00"
+    warp_to(direct_vm, known_now)
+    known_dt = datetime.fromisoformat(known_now)
+    leader_result = json.dumps(
+        {
+            "verdict": "CONDITION_MET",
+            "extracted_value": "1.08",
+            "observed_at": (known_dt + timedelta(seconds=300)).isoformat(),
+        }
+    )
+    assert direct_vm.run_validator(leader_result=leader_result) is True
+
+
+def test_validator_rejects_a_timestamp_one_second_past_the_clock_skew_boundary(
+    direct_deploy, direct_vm, direct_owner
+):
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    c = _deploy(direct_deploy, direct_vm, direct_owner)
+    feed_id = _create_feed(c, direct_vm, direct_owner)
+    _mock_response(direct_vm, '{"rate": 1.08}')
+    _mock_verdict(direct_vm, '{"verdict": "CONDITION_MET", "extracted_value": "1.08"}')
+    c.check_feed(feed_id)
+
+    known_now = "2026-06-01T00:00:00+00:00"
+    warp_to(direct_vm, known_now)
+    known_dt = datetime.fromisoformat(known_now)
+    leader_result = json.dumps(
+        {
+            "verdict": "CONDITION_MET",
+            "extracted_value": "1.08",
+            "observed_at": (known_dt + timedelta(seconds=301)).isoformat(),
+        }
+    )
+    assert direct_vm.run_validator(leader_result=leader_result) is False
+
+
+# ---------------------------------------------------------------------
 # Unknown ids
 # ---------------------------------------------------------------------
 

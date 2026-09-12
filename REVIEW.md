@@ -246,64 +246,108 @@ verdict matched, the round would be accepted, that value would become
 timestamp no genuine future call could ever catch up to - a permanent denial of
 service on that feed from a single bad round.
 
-**Fix - two complementary halves, since the problem has two directions:**
+**First fix attempted - two complementary halves, since the problem has two
+directions:**
 
 1. **Future-ward**, bound to independently verified evidence in `JUDGE_PRINCIPLE`
-   itself:
+   itself - each validator's own honestly-fetched sense of "now," with a "wildly
+   inconsistent" timestamp treated as a disagreement.
+2. **Past-ward**, caught deterministically against already-committed on-chain state -
+   the accepted `observed_at` must strictly exceed `last_checked_at`.
 
-   ```
-   "... Each response also carries an 'observed_at' timestamp recording when it
-   fetched the API. Two such timestamps a few seconds or minutes apart are both
-   normal and NOT a disagreement ... But this field is not exempt from scrutiny: you
-   have your own sense, from your own independent fetch, of what moment 'now'
-   actually is. If the other response's 'observed_at' is wildly inconsistent with
-   that - hours, days, or years away ... the two responses are NOT equivalent,
-   regardless of whether their verdicts match ..."
-   ```
+This closed the literal case described and was deployed and tested. But on honest
+review it was still enforcement by prose for the future-ward half: an LLM judging
+"wildly inconsistent" against natural-language instruction, not a hard numeric
+tolerance. A moderately-wrong timestamp might not trip language keyed to "hours, days,
+or years," and there was no way to demonstrate a boundary because none existed as a
+number anywhere in the code. That is a real gap in rigor, not a hypothetical one, and
+it was called out directly rather than left standing.
 
-   This is deliberately enforced through the equivalence mechanism, not contract
-   code, because contract code has no independent time reference to check a future
-   value against without reading a local clock - which would reintroduce section 3a's
-   own defect on a new axis. Each validator's own honestly-executed fetch, at its own
-   real moment, is the only genuinely independent evidence this runtime has, since no
-   deterministic on-chain clock exists on the pinned runner (§3a already documents
-   probing `gl.message`/`gl.vm` directly and confirming neither exists).
+**The actual fix replaces the consensus mechanism.** `check_feed` no longer uses
+`gl.eq_principle.prompt_comparative` with a natural-language principle at all. It uses
+`gl.vm.run_nondet_unsafe(leader_fn, validator_fn)` - GenLayer's own custom
+leader/validator primitive - where `validator_fn` is ordinary Python:
 
-2. **Past-ward**, caught deterministically, for free, against already-committed
-   on-chain state - no clock read needed for this half at all:
+```python
+def validator_fn(leader_result) -> bool:
+    if not isinstance(leader_result, gl.vm.Return):
+        try:
+            leader_fn()
+            return False
+        except Exception:
+            return True
 
-   ```python
-   if int(feed.check_count) > 0:
-       last = _parse_iso(feed.last_checked_at)
-       observed_dt = _parse_iso(observed_at)
-       if last is not None and observed_dt is not None and observed_dt <= last:
-           raise gl.vm.UserError("round timestamp did not advance past this feed's last recorded time")
-   ```
+    leader_raw = leader_result.calldata
+    my_raw = leader_fn()
 
-**An honest limitation, not a claimed proof.** The future-ward half is enforced by an
-LLM judging "wildly inconsistent" against natural-language instruction, not a hard
-numeric tolerance - a moderately-wrong timestamp might not trip language keyed to
-"hours, days, or years." This is the same trust model this entire portfolio already
-relies on for every verdict a judged round reaches, not a new or weaker standard
-invented for this fix, but it is real and worth stating rather than hiding. It also
-cannot be exercised in direct-mode testing, which trusts a single leader execution by
-construction rather than genuinely reconciling multiple independent validators - only
-live consensus can actually prove it, and both live integration tests below did pass
-against the redeployed address, including the one that exercises real cooldown timing
-end to end.
+    leader_category = _verdict_category(leader_raw)
+    my_category = _verdict_category(my_raw)
+    if leader_category != my_category:
+        return False
+    if leader_category is None:
+        return True
 
-**Tests added:** `test_check_feed_rejects_a_round_timestamp_at_or_before_the_last_recorded_time`,
+    leader_dt = _parse_iso(_parse_observed_at(leader_raw))
+    my_dt = _parse_iso(_parse_observed_at(my_raw))
+    if leader_dt is None or my_dt is None:
+        return False
+
+    skew = abs((leader_dt - my_dt).total_seconds())
+    return skew <= MAX_CLOCK_SKEW_SECONDS
+```
+
+Every validator independently re-runs `leader_fn` itself - its own fetch, its own
+model call, its own clock read - and the leader's proposal is accepted only if the
+verdict category matches exactly *and* the leader's `observed_at` falls within
+`MAX_CLOCK_SKEW_SECONDS` (300s, a fixed constant) of that validator's own,
+independently-observed moment. That is a number in the code, not a judgment call - a
+leader proposing a timestamp outside that window fails arithmetic, not a vibe check.
+The deterministic past-regression check (item 2 above) is unchanged and remains a
+second, independent line of defense needing no clock at all.
+
+**This is proven directly, not inferred from the happy path continuing to work.**
+gltest's direct mode calls `leader_fn()` once and never actually invokes
+`validator_fn` during an ordinary contract call - it only records it. Seven new tests
+use `direct_vm.run_validator()` to genuinely execute the real, captured `validator_fn`
+against a crafted "leader" result:
+
+- `test_validator_rejects_a_leader_claiming_a_far_future_timestamp` and
+  `test_validator_rejects_a_leader_claiming_a_far_past_timestamp` - the literal attack
+  the review described, reproduced and confirmed rejected (`False`).
+- `test_validator_accepts_a_timestamp_exactly_at_the_clock_skew_boundary` and
+  `test_validator_rejects_a_timestamp_one_second_past_the_clock_skew_boundary` - the
+  exact numeric boundary, pinned to the second.
+- `test_validator_agrees_with_an_honest_leader_result`,
+  `test_validator_rejects_a_leader_whose_verdict_disagrees_with_its_own_independent_run`,
+  `test_validator_agrees_when_both_independently_hit_the_same_fetch_error` - the
+  verdict-agreement half, including the shared-failure case.
+
+**Honest limitation that remains:** `MAX_CLOCK_SKEW_SECONDS` is a chosen tolerance
+(300s), generous enough to absorb real fetch-plus-LLM latency between two genuinely
+independent executions. It is not a claim that no value inside that window could ever
+be dishonest - only that the specific, named attack (a leader proposing a timestamp
+"hours, days, or years" away) is now rejected by a hard bound rather than a hope that
+an LLM reads a natural-language instruction the way a human author intended. No
+deterministic on-chain clock exists on this runner to check against instead (§3a).
+
+**Tests added, direct mode:** the seven `validator_fn` tests above, plus the three
+monotonicity tests from the first fix attempt
+(`test_check_feed_rejects_a_round_timestamp_at_or_before_the_last_recorded_time`,
 `test_check_feed_rejects_a_round_timestamp_before_the_last_recorded_time`,
-`test_check_feed_accepts_a_round_timestamp_that_advances_even_by_one_second` - all new,
-all passing, plus two pre-existing cooldown tests adjusted to isolate the cooldown
-rejection they actually test from the new monotonicity guard (direct mode's unwarped
-clock returns the identical instant on back-to-back calls, which the new guard
-correctly, if incidentally, also rejects).
+`test_check_feed_accepts_a_round_timestamp_that_advances_even_by_one_second`), still
+correct and unchanged. Two pre-existing cooldown tests remain adjusted to isolate the
+cooldown rejection they actually test from the monotonicity guard (direct mode's
+unwarped clock returns the identical instant on back-to-back calls, which the guard
+correctly, if incidentally, also rejects). 39 direct tests total, all passing.
 
-**Deployment:** redeployed to `0x25E2C67fc69Dbd338749D69363d6129375fe728c`
-(2026-09-12, unanimous validator agreement), on-chain code independently re-verified
-with `genlayer code` immediately after deployment - confirmed the new equivalence
-wording and monotonicity guard are present, and confirmed zero occurrences of the old
-"ignore observed_at entirely" phrasing anywhere in the deployed bytecode. All 32 direct
-tests pass, lint is clean, and all 3 integration tests pass against this address on
-live consensus.
+**Deployment:** redeployed to `0xbA03D3cfF2D0dF47b65499463d8C14dF01043c0c`
+(2026-09-12, unanimous validator agreement), superseding
+`0x25E2C67fc69Dbd338749D69363d6129375fe728c` (the first, prose-based fix). On-chain
+code independently re-verified with `genlayer code` immediately after deployment -
+confirmed `run_nondet_unsafe`, `MAX_CLOCK_SKEW_SECONDS`, and `validator_fn` are present,
+and confirmed zero occurrences of `JUDGE_PRINCIPLE` or `prompt_comparative` anywhere in
+the deployed bytecode. All 3 integration tests pass against this address on live
+consensus, including one run that genuinely exercised `validator_fn`'s shared-failure
+agreement path for real: a transient CoinGecko rate limit produced a real
+`__FETCH_ERROR__` on the leader, and multiple live validators independently reached
+the same conclusion and voted `agree` - not a simulated case, an organic one.

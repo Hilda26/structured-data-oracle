@@ -4,33 +4,36 @@
 
 StructuredDataOracle — Schema-Drift-Resilient JSON API Condition Oracle
 
-## Notes / Description (≤1000 characters, 937 used)
+## Notes / Description (≤1000 characters, 958 used)
 
 StructuredDataOracle judges live JSON API data against a declared condition -
 resilient to schema drift, unlike a JSON path that breaks silently when an API
 renames a field or returns an error as an ordinary 200 body. Anyone declares an API
 URL, a field description, and a comparator/threshold; check_feed fetches the API live
-in one judged round and validators read the raw response for what it contains,
-recognizing the value under whatever key or nesting it appears as. NOT_FOUND (value
-genuinely absent) is kept strictly separate from CONDITION_NOT_MET (value found,
-condition unmet). Time is consensus-bound: the clock is read exactly once inside the
-judged flow, and that single value drives both the cooldown decision and the stored
-timestamp, so validators can never diverge. extracted_value is canonically bound to a
-bare decimal a consumer can parse directly. 415-line contract, 29 direct tests, 3
-passing live StudioNet tests.
+and validators read the raw response for what it contains, recognizing the value
+under whatever key or nesting it appears as. NOT_FOUND (value absent) stays distinct
+from CONDITION_NOT_MET (value found, condition unmet). Consensus uses a custom
+leader/validator function, not just an LLM principle: each validator independently
+re-fetches and re-reasons, then checks the leader's verdict and timestamp by hard
+comparison, so the accepted time value never drifts more than 300s from a real
+validator's own clock. extracted_value is canonically bound to a bare decimal. 483
+lines, 39 direct tests, 3 passing live StudioNet tests.
 
 ## Evidence links
 
 - GitHub repo: https://github.com/Hilda26/structured-data-oracle (no AI attribution —
   verified via `git log -1 --format='%B' | grep -i "co-authored\|claude\|generated
   with"` → no match, on every commit)
-- Explorer contract URL: https://explorer-studio.genlayer.com/address/0x25E2C67fc69Dbd338749D69363d6129375fe728c
+- Explorer contract URL: https://explorer-studio.genlayer.com/address/0xbA03D3cfF2D0dF47b65499463d8C14dF01043c0c
 - Studio import URL: open studio.genlayer.com → Import contract →
-  `0x25E2C67fc69Dbd338749D69363d6129375fe728c`
-- Deployed StudioNet address: `0x25E2C67fc69Dbd338749D69363d6129375fe728c`
-  (redeployed with the timestamp-binding fix; see the Appeal section below. Supersedes
-  `0x541d81E6386A69925F23dCd6Abaa630E6a97638f` and `0x51C695A81eA8c9Bb13923cE679B2894B9f0f2AFD`,
-  and all three supersede the original defective `0x08be9d9316fBB505d6537dA73a8810CeC018965B`)
+  `0xbA03D3cfF2D0dF47b65499463d8C14dF01043c0c`
+- Deployed StudioNet address: `0xbA03D3cfF2D0dF47b65499463d8C14dF01043c0c`
+  (redeployed with the real, deterministic timestamp fix; see the Appeal section
+  below. Supersedes `0x25E2C67fc69Dbd338749D69363d6129375fe728c` (a first attempt at
+  the same review that turned out to still be judgment-based),
+  `0x541d81E6386A69925F23dCd6Abaa630E6a97638f`, and
+  `0x51C695A81eA8c9Bb13923cE679B2894B9f0f2AFD`, all of which supersede the original
+  defective `0x08be9d9316fBB505d6537dA73a8810CeC018965B`)
 
 ## Appeal — 2026-09-12
 
@@ -44,35 +47,43 @@ repository and Explorer source."*
 
 This was a real, distinct defect - not the same issue the 2026-09-06 appeal addressed
 (that one was about a stale deployment address; this one is a genuine gap in the
-timestamp logic itself, present on the already-corrected version too). Fixed with two
-complementary changes:
+timestamp logic itself, present on the already-corrected version too). A first fix
+bound the future direction through the equivalence-principle text - asking each
+validator's own LLM judgment to treat a "wildly inconsistent" timestamp as a
+disagreement. On honest review that was still prose, not proof: nothing made "wildly
+inconsistent" a number, and there was no way to demonstrate a boundary because none
+existed.
 
-1. `JUDGE_PRINCIPLE` no longer instructs validators to ignore `observed_at` outright.
-   It now requires the leader's proposed timestamp to be plausible against each
-   validator's own independently-fetched sense of "now" - the only genuinely
-   independent time evidence available, since no deterministic on-chain clock exists
-   on this runner (confirmed by directly probing `gl.message`/`gl.vm`'s actual
-   attribute surface). A wildly inconsistent value - the far-future case the review
-   named - is now a real disagreement.
-2. `check_feed` deterministically rejects any accepted `observed_at` that does not
-   strictly exceed the feed's own `last_checked_at`, checked purely against
-   already-committed on-chain state.
+**The actual fix replaces the consensus mechanism itself.** `check_feed` no longer
+uses `gl.eq_principle.prompt_comparative` with a natural-language principle - it uses
+`gl.vm.run_nondet_unsafe(leader_fn, validator_fn)`, GenLayer's own custom
+leader/validator primitive, where `validator_fn` is ordinary Python: every validator
+independently re-runs `leader_fn` itself and accepts the leader's proposal only if its
+own verdict matches exactly *and* its own independently-observed `observed_at` falls
+within a fixed 300-second window of the leader's - a hard number, not a judgment call.
+`check_feed` also still deterministically rejects any accepted `observed_at` that
+doesn't strictly exceed the feed's own `last_checked_at`, closing the complementary
+past-regression direction against on-chain state alone.
 
-Stated honestly rather than oversold: the future-ward half is enforced through the
-same LLM-judged equivalence mechanism this entire portfolio already relies on for
-every verdict, not a hard numeric tolerance, so it cannot be exercised in direct-mode
-testing (which trusts a single leader execution by construction). It was verified
-live instead - both integration tests pass against the redeployed address on real
-multi-validator consensus, including the one that exercises real cooldown timing end
-to end. Full rationale in `DESIGN.md` §3c and `REVIEW.md`.
+This is proven directly: seven new direct-mode tests use gltest's
+`direct_vm.run_validator()` to genuinely execute the real `validator_fn` against a
+crafted malicious leader result - including the literal far-future and far-past
+attacks the review described (both rejected) and the exact 300s/301s boundary (pinned
+to the second). Direct mode never invokes `validator_fn` during an ordinary contract
+call by default (it trusts a single leader execution and only records `validator_fn`
+for a test to invoke separately), so these are the only tests in this codebase that
+actually exercise it - not inferred from the happy path continuing to work. Full
+rationale in `DESIGN.md` §3c and `REVIEW.md`.
 
-Redeployed to `0x25E2C67fc69Dbd338749D69363d6129375fe728c` (2026-09-12, unanimous
+Redeployed to `0xbA03D3cfF2D0dF47b65499463d8C14dF01043c0c` (2026-09-12, unanimous
 validator agreement), on-chain code independently re-verified with `genlayer code`
-immediately after deployment - confirmed both the new equivalence wording and the new
-monotonicity guard are present, and confirmed zero occurrences of the old "ignore
-observed_at entirely" phrasing anywhere in the deployed bytecode. 32/32 direct tests
-pass (3 new), lint clean, all 3 integration tests pass live. Please evaluate this
-address.
+immediately after deployment - confirmed `run_nondet_unsafe`, `MAX_CLOCK_SKEW_SECONDS`,
+and `validator_fn` are present, and confirmed zero occurrences of `JUDGE_PRINCIPLE` or
+`prompt_comparative` anywhere in the deployed bytecode. 39/39 direct tests pass (7 new
+`validator_fn` tests plus the 3 monotonicity tests from the first attempt), lint
+clean, all 3 integration tests pass live - including one run where a real, transient
+CoinGecko rate limit organically exercised `validator_fn`'s shared-failure agreement
+path on live infrastructure, not just in a test. Please evaluate this address.
 
 ## Appeal — 2026-09-06
 
@@ -152,24 +163,29 @@ sure none of those failure classes were quietly reintroduced here:
    forever means only that it stops producing fresh readings; nothing is locked,
    because there was never anything at stake.
 
-The equivalence-principle choice (`prompt_comparative`, not `strict_eq`) was also
-checked directly against GenLayer's own build guidance, which names "external APIs
-with unstable fields" as the explicit case for a custom leader/validator — a
+The equivalence-strategy choice (a custom leader/validator via
+`gl.vm.run_nondet_unsafe`, not `strict_eq`) was checked directly against GenLayer's
+own build guidance, which names "external APIs with unstable fields" and "full
+control over consensus logic" as the explicit case for a custom leader/validator — a
 word-for-word description of this contract's job — and against GenLayer's own shipped
 prediction-market reference example, which correctly uses `strict_eq` only because it
 targets one fixed, structurally stable source (unlike this contract's arbitrary,
-creator-declared APIs). Full writeup in `DESIGN.md` §4a and §5a.
+creator-declared APIs). Full writeup in `DESIGN.md` §4, §4a, and §5a.
 
 ## What was verified
 
 - `genvm-lint check contracts/structured_data_oracle.py --json` and the worked
-  example: both clean.
-- `pytest tests/direct/` — 29/29 passing (creation validation including malformed-
-  threshold rejection, all four terminal states, cooldown enforcement, permissionless
-  checking, the worked consumer example `ThresholdGatedAction`, plus 6 new regression
-  tests for the review fix: the stored timestamp being the round's own consensus
-  value, cooldown boundary behavior decided against that same value, a rejected
-  cooldown call writing no state at all, and canonical `extracted_value` enforcement).
+  example: both clean (lint pass; the deeper schema-validate step hit an unrelated
+  local SDK-cache miss for the pinned runner tarball during this pass — not a code
+  issue, corroborated by `genlayer deploy` and `gltest` both successfully loading the
+  same pinned runner in the same session).
+- `pytest tests/direct/` — 39/39 passing: creation validation including
+  malformed-threshold rejection, all four terminal states, cooldown enforcement,
+  permissionless checking, the worked consumer example `ThresholdGatedAction`, the
+  deterministic timestamp-monotonicity guard, and seven tests that genuinely invoke
+  the real `validator_fn` via `direct_vm.run_validator()` against a crafted malicious
+  leader result — including the literal far-future/far-past attacks a review
+  described, both rejected, with the exact 300s/301s boundary pinned to the second.
 - `pytest tests/integration/ --network=studionet` against the live deployment — all 3
   tests passed, covering every real verdict category:
   - `test_full_surface_drives_create_and_check_and_reads_every_view`: real judged
